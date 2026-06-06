@@ -86,6 +86,133 @@ npm test
 | `npm test` | Run all tests (serial) |
 | `npm run test:coverage` | Tests with coverage report |
 
+## Usage
+
+Airlift is a library, not a CLI. You wire the `Packer` and `Importer` orchestrators in your own script.
+
+### 1. Create a Manifest
+
+The Manifest is a JSON file listing tracked projects, their git repos, and package coordinates:
+
+```json
+{
+  "projects": [
+    {
+      "id": "my-project",
+      "gitLocation": "https://github.com/org/my-project.git",
+      "packages": [
+        { "coordinates": "lodash", "ecosystem": "npm" },
+        { "coordinates": "requests", "ecosystem": "Python" }
+      ]
+    }
+  ]
+}
+```
+
+| Field | Description |
+|---|---|
+| `id` | Unique project identifier (1–128 chars) |
+| `gitLocation` | Git remote URL or local path |
+| `packages[]` | Optional; 0–1000 package coordinates |
+| `packages[].coordinates` | npm package name or PyPI distribution name |
+| `packages[].ecosystem` | `"npm"` or `"Python"` |
+
+### 2. Run the Packer (source side)
+
+```typescript
+import { Packer } from './packer/packer';
+import { FullSnapshotStrategy } from './packer/packing-strategy';
+import { NpmAdapter } from './packer/npm-adapter';
+import { PythonAdapter } from './packer/python-adapter';
+
+const packer = new Packer();
+
+const report = await packer.run({
+  manifestPath: './manifest.json',
+  outputBundlePath: './bundle.json',
+  syncRunId: 'run-2024-01-15-001',
+  adapters: new Map([
+    ['npm', new NpmAdapter({ baseUrl: 'https://source.jfrog.io/artifactory', apiKey: '...' })],
+    ['Python', new PythonAdapter({ baseUrl: 'https://source.jfrog.io/artifactory', apiKey: '...' })],
+  ]),
+  strategy: new FullSnapshotStrategy(), // V1
+});
+
+console.log(report.overallStatus); // "succeeded fully" | "succeeded with skipped or failed items" | "failed"
+```
+
+This produces `bundle.json` — a self-contained Transfer_Bundle ready to carry across the air gap.
+
+### 3. Run the Importer (destination side)
+
+```typescript
+import { Importer } from './importer/importer';
+import { NpmAdapter } from './packer/npm-adapter';
+import { PythonAdapter } from './packer/python-adapter';
+
+const importer = new Importer();
+
+const report = await importer.run({
+  bundlePath: './bundle.json',
+  syncRunId: 'run-2024-01-15-001',
+  deliveryVersion: 'V1',
+  gitConfig: {
+    baseUrl: 'https://gitlab.internal.example.com',
+    token: 'glpat-...',
+    namespace: 'mirrored-projects',
+    localReposBase: '/var/git/mirrors',
+  },
+  adapters: new Map([
+    ['npm', new NpmAdapter({ baseUrl: 'https://dest.jfrog.io/artifactory', apiKey: '...' })],
+    ['Python', new PythonAdapter({ baseUrl: 'https://dest.jfrog.io/artifactory', apiKey: '...' })],
+  ]),
+});
+
+console.log(report.createdRepositories);  // ["my-project", ...]
+console.log(report.uploadedVersions);     // [{ coordinates, version, ecosystem }, ...]
+console.log(report.overallStatus);        // "succeeded fully" | ...
+```
+
+### Configuration reference
+
+**PackerConfig**
+
+| Field | Type | Description |
+|---|---|---|
+| `manifestPath` | `string` | Path to Manifest JSON |
+| `outputBundlePath` | `string` | Where to write the Transfer_Bundle |
+| `syncRunId` | `string` | Unique identifier for this run |
+| `adapters` | `Map<Ecosystem, EcosystemAdapter>` | npm + Python adapters for Source Artifactory |
+| `strategy` | `PackingStrategy` | `FullSnapshotStrategy` (V1) or `IncrementalStrategy` (V2) |
+
+**ImporterConfig**
+
+| Field | Type | Description |
+|---|---|---|
+| `bundlePath` | `string` | Path to the Transfer_Bundle |
+| `syncRunId` | `string` | Must match the pack run's syncRunId |
+| `deliveryVersion` | `"V1"` \| `"V2"` | Delivery version |
+| `gitConfig` | `GitLabConfig` | Destination GitLab connection |
+| `adapters` | `Map<Ecosystem, EcosystemAdapter>` | npm + Python adapters for Destination Artifactory |
+
+**GitLabConfig**
+
+| Field | Type | Description |
+|---|---|---|
+| `baseUrl` | `string` | GitLab instance URL |
+| `token` | `string` | Personal access token |
+| `namespace` | `string` | GitLab group/namespace for mirrored repos |
+| `localReposBase` | `string` | Local directory for bare repo mirrors |
+
+**ArtifactoryConfig**
+
+| Field | Type | Description |
+|---|---|---|
+| `baseUrl` | `string` | Artifactory instance URL |
+| `apiKey` | `string` | API key (preferred) |
+| `username` | `string` | Basic auth username (fallback) |
+| `password` | `string` | Basic auth password (fallback) |
+
 ## Testing
 
 Unit and property-based tests live alongside source files (`src/**/*.test.ts`). Integration and e2e tests live in `test/`.
